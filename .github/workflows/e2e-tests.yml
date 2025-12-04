@@ -28,11 +28,11 @@ jobs:
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/googlechrome.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt update
-          sudo apt install - -y google-chrome-stable
+          sudo apt install -y google-chrome-stable
 
       - name: Install ChromeDriver
         run: |
-          CHROME_VERSION=$(google-chrome --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          CHROME_VERSION=$(google-chrome --version | grep -oE '[0-9]+\.[0-9]+\ B\.[0-9]+\.[0-9]+' | head -1)
           CHROME_MAJOR=$(echo "$CHROME_VERSION" | cut -d. -f1)
           DRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_$CHROME_MAJOR")
           wget -O chromedriver.zip "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/$DRIVER_VERSION/linux64/chromedriver-linux64.zip"
@@ -40,18 +40,22 @@ jobs:
           sudo mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
           sudo chmod +x /usr/local/bin/chromedriver
 
-      - name: Start Vite server
+      - name: Start Vite server if frontend exists
         run: |
-          npm install
-          npm run dev -- --port 8000 --host 0.0.0.0 > vite.log 2>&1 &
-          npx wait-on http://127.0.0.1:8000 --timeout 90000
+          if [ -f package.json ]; then
+            npm install
+            npm run dev -- --port 8000 --host 0.0.0.0 > vite.log 2>&1 &
+            npx wait-on http://127.0.0.1:8000 --timeout 90000
+          else
+            echo "No package.json found - skipping Vite server start"
+          fi
 
-      - name: Patch Zhilkina test (headless + keep localhost:3000)
+      - name: Patch Zhilkina test (headless + port 8000)
         run: |
           cat > patch.py <<'EOF'
           with open("zhilkina_first_test.py", encoding="utf-8") as f:
               content = f.read()
-          content = content.replace("http://localhost:3000", "http://localhost:8000")
+          \ncontent = content.replace("http://localhost:3000", "http://localhost:8000")
           if "def setup(self):" in content:
               lines = content.splitlines()
               new_lines = []
@@ -84,7 +88,6 @@ jobs:
         run: |
           mkdir -p screenshots
           python -m pytest zhilkina_first_test_ci.py -v --tb=short || true
-          sed -i 's|http://localhost:8000|http://localhost:8000|g' Berezhnaya_SECOND.py
           python Berezhnaya_SECOND.py || true
 
       - name: Upload artifacts
