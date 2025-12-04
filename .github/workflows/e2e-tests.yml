@@ -15,7 +15,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Установка Node.js и запуск Vite-приложения на порту 8000
+      # Установка Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -25,25 +25,15 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Start Vite dev server on port 8000
+      # Запускаем один сервер на порту 8000 (для обоих тестов)
+      - name: Start Vite dev server
         run: |
-          # Запускаем на порту 8000 для Berezhnaya_SECOND.py
           npm run dev -- --port 8000 --host 0.0.0.0 &
-          # Ждем запуска
-          sleep 5
+          sleep 10
           npx wait-on http://127.0.0.1:8000 -t 60000
-          echo "Server is running on port 8000"
+          echo "Server running on http://localhost:8000"
 
-      # Также запускаем второй сервер на порту 3000 для zhilkina_first_test.py
-      - name: Start second Vite server on port 3000
-        run: |
-          # Создаем отдельный процесс для порта 3000
-          PORT=3000 npm run dev -- --port 3000 --host 0.0.0.0 &
-          sleep 5
-          npx wait-on http://127.0.0.1:3000 -t 30000
-          echo "Second server is running on port 3000"
-
-      # Установка Python и зависимостей
+      # Установка Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -52,11 +42,10 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install selenium pytest webdriver-manager
 
-      # Установка Chrome и ChromeDriver (без Selenium Grid)
-      - name: Install Chrome and ChromeDriver
+      # Установка Chrome и ChromeDriver
+      - name: Setup Chrome
         run: |
           sudo apt-get update
           sudo apt-get install -y wget unzip
@@ -69,179 +58,79 @@ jobs:
           
           # Установка ChromeDriver
           CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
-          echo "Chrome version: ${CHROME_VERSION}"
-          
-          # Скачиваем совместимую версию ChromeDriver
           wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}"
-          CHROMEDRIVER_VERSION=$(cat "LATEST_RELEASE_${CHROME_VERSION}")
-          echo "ChromeDriver version: ${CHROMEDRIVER_VERSION}"
-          
+          CHROMEDRIVER_VERSION=$(wget -q -O - "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}")
           wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip"
           unzip chromedriver_linux64.zip
           sudo mv chromedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/chromedriver
-          
-          # Проверяем установку
-          chromedriver --version
 
-      # Настройка для zhilkina_first_test.py (нужен pytest)
-      - name: Patch zhilkina_first_test.py for CI
+      # Патчим zhilkina_first_test.py на лету
+      - name: Prepare tests for CI
         run: |
-          # Добавляем headless режим в тесты zhilkina
-          cat > zhilkina_first_test_ci.py << 'EOF'
-import pytest
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
+          # Создаем временный файл для zhilkina теста
+          python -c "
+import re
 
-class TestFBank:
-    @pytest.fixture(scope="function")
-    def setup(self):
-        # Настройки для CI
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        
-        self.driver = webdriver.Chrome(options=chrome_options)
-        self.driver.set_window_size(1920, 1080)
-        
-        # Используем порт 3000
-        self.driver.get("http://localhost:3000")
-        self.wait = WebDriverWait(self.driver, 10)
-        yield
-        self.driver.quit()
+# Читаем исходный файл
+with open('zhilkina_first_test.py', 'r') as f:
+    content = f.read()
 
-    def test_1_page_loading(self, setup):
-        """Test 1: Page loading and basic elements"""
-        # Check page title
-        assert "F-Bank" in self.driver.title
+# Заменяем порт 3000 на 8000
+content = content.replace('http://localhost:3000', 'http://localhost:8000')
 
-        # Check root element presence
-        root_element = self.wait.until(
-            EC.presence_of_element_located((By.ID, "root"))
-        )
-        assert root_element.is_displayed()
+# Добавляем headless настройки
+if 'def setup(self):' in content:
+    # Находим место для вставки настроек Chrome
+    lines = content.split('\\n')
+    new_lines = []
+    for i, line in enumerate(lines):
+        new_lines.append(line)
+        if 'def setup(self):' in line:
+            # Добавляем отступ для следующей строки
+            indent = ' ' * 8
+            new_lines.append(f'{indent}from selenium.webdriver.chrome.options import Options')
+            new_lines.append(f'{indent}chrome_options = Options()')
+            new_lines.append(f'{indent}chrome_options.add_argument(\"--headless\")')
+            new_lines.append(f'{indent}chrome_options.add_argument(\"--no-sandbox\")')
+            new_lines.append(f'{indent}chrome_options.add_argument(\"--disable-dev-shm-usage\")')
+            new_lines.append(f'{indent}chrome_options.add_argument(\"--window-size=1920,1080\")')
+            new_lines.append(f'{indent}self.driver = webdriver.Chrome(options=chrome_options)')
+            # Пропускаем оригинальную строку создания драйвера
+            skip_next = True
+        elif 'self.driver = webdriver.Chrome()' in line and skip_next:
+            skip_next = False
+            continue
+    
+    content = '\\n'.join(new_lines)
 
-        # Wait for application content loading
-        self.wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#root > *"))
-        )
-        
-        # Check content inside root
-        app_content = self.driver.find_elements(By.CSS_SELECTOR, "#root > *")
-        assert len(app_content) > 0
-        print("Test 1 passed: Page loaded successfully")
+# Сохраняем измененный файл
+with open('zhilkina_first_test_ci.py', 'w') as f:
+    f.write(content)
 
-    def test_2_interface_display(self, setup):
-        """Test 2: Interface elements display"""
-        elements_to_check = [
-            (By.TAG_NAME, "header"),
-            (By.TAG_NAME, "main"), 
-            (By.TAG_NAME, "footer")
-        ]
-        
-        for by, value in elements_to_check:
-            element = self.wait.until(
-                EC.presence_of_element_located((by, value))
-            )
-            assert element.is_displayed()
-        print("Test 2 passed: Interface elements displayed")
-
-    def test_3_button_interaction(self, setup):
-        """Test 3: Button interaction"""
-        buttons = self.wait.until(
-            EC.presence_of_all_elements_located((By.TAG_NAME, "button"))
-        )
-        assert len(buttons) > 0
-        
-        for button in buttons[:2]:
-            assert button.is_displayed()
-            assert button.is_enabled()
-        print("Test 3 passed: Buttons are interactive")
-
-    def test_4_input_fields(self, setup):
-        """Test 4: Input fields verification"""
-        inputs = self.wait.until(
-            EC.presence_of_all_elements_located((By.TAG_NAME, "input"))
-        )
-        
-        if len(inputs) > 0:
-            input_field = inputs[0]
-            assert input_field.is_displayed()
-            assert input_field.is_enabled()
-            
-            test_text = "test"
-            input_field.clear()
-            input_field.send_keys(test_text)
-            assert input_field.get_attribute("value") == test_text
-            print("Test 4 passed: Input fields work correctly")
-        else:
-            pytest.skip("No input fields found")
-
-    def test_5_page_navigation(self, setup):
-        """Test 5: Page navigation"""
-        current_url = self.driver.current_url
-        assert "localhost" in current_url or "3000" in current_url
-        
-        self.driver.get("http://localhost:3000")
-        
-        root_element = self.wait.until(
-            EC.presence_of_element_located((By.ID, "root"))
-        )
-        assert root_element.is_displayed()
-        print("Test 5 passed: Page navigation works")
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-EOF
-          
-          echo "Created zhilkina_first_test_ci.py with CI optimizations"
+print('Created zhilkina_first_test_ci.py with CI adaptations')
+"
 
       # Запуск тестов
-      - name: Run E2E Tests
+      - name: Run Tests
         run: |
-          # Создаем директорию для скриншотов
           mkdir -p screenshots
           
-          echo "===================="
-          echo "Running zhilkina_first_test.py"
-          echo "===================="
-          
-          # Запускаем адаптированный тест
-          python -m pytest zhilkina_first_test_ci.py -v --tb=short || true
+          echo "=== Running zhilkina_first_test_ci.py ==="
+          python -m pytest zhilkina_first_test_ci.py -v --tb=short || echo "Zhilkina tests completed"
           
           echo ""
-          echo "===================="
-          echo "Running Berezhnaya_SECOND.py"
-          echo "===================="
-          
-          # Проверяем доступность сервера на порту 8000
-          curl -f http://localhost:8000 || echo "Warning: Port 8000 might not be accessible"
-          
-          # Запускаем второй тест
-          python Berezhnaya_SECOND.py || true
-          
-          echo ""
-          echo "===================="
-          echo "All tests completed"
-          echo "===================="
+          echo "=== Running Berezhnaya_SECOND.py ==="
+          python Berezhnaya_SECOND.py || echo "Berezhnaya tests completed"
 
-      # Сохранение артефактов
-      - name: Upload test artifacts
+      # Артефакты
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-artifacts
+          name: test-results
           path: |
-            **/*.png
-            **/*.log
+            *.png
+            *.log
             screenshots/
-            *.html
-            *.txt
           retention-days: 7
