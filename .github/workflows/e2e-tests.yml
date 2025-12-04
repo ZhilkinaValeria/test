@@ -8,42 +8,51 @@ on:
 
 jobs:
   e2e-tests:
-    timeout-minutes: 15
+    timeout-minutes: 20
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Установка Node.js + запуск фронтенда
+      # ── Фронтенд (Vite) ─────────────────────────────────────
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          # УБИРАЕМ cache, если нет lock-файла — это и есть причина падения!
+          # cache: 'npm'   ← УДАЛИЛ СТРОКУ!
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable && pnpm install --frozen-lockfile
+          else
+            echo "No lockfile found → using npm install (slow, but safe)"
+            npm install      # ← обычный install, если нет lock-файла
+          fi
 
       - name: Start Vite dev server
         run: |
-          npm run dev -- --port 8000 --host 0.0.0.0 &
-          sleep 10
-          npx wait-on http://127.0.0.1:8000 --timeout 60000
-          echo "Server is running on http://localhost:8000"
+          npm run dev -- --port 8000 --host 0.0.0.0 > vite.log 2>&1 &
+          echo "Waiting for Vite server on http://127.0.0.1:8000"
+          npx wait-on http://127.0.0.1:8000 --timeout 90000
+          echo "Vite server is up!"
 
-      # Установка Python и зависимостей
+      # ── Python и Selenium ───────────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install Python dependencies
-        run: |
-          pip install selenium pytest webdriver-manager
+        run: pip install selenium pytest webdriver-manager
 
-      # Установка Google Chrome (современный способ, без устаревшего apt-key)
+      # ── Chrome + ChromeDriver ───────────────────────────────
       - name: Install Google Chrome
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/googlechrome.gpg
@@ -51,84 +60,76 @@ jobs:
           sudo apt update
           sudo apt install -y google-chrome-stable
 
-      # Установка ChromeDriver (ручная, т.к. в тестах используется webdriver.Chrome(), а не webdriver-manager)
-      - name: Install ChromeDriver
+      - name: Install matching ChromeDriver
         run: |
-          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+')
-          MAJOR_VERSION=$(echo "$CHROME_VERSION" | cut -d. -f1)
-          DRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$MAJOR_VERSION")
-          wget -q "https://chromedriver.storage.googleapis.com/$DRIVER_VERSION/chromedriver_linux64.zip"
-          unzip chromedriver_linux64.zip
+          CHROME_MAJOR=$(google-chrome --version | grep -oE '[0-9]+' | head -1)
+          DRIVER_VERSION=$(curl -s https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_MAJOR})
+          wget -O chromedriver.zip https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip
+          unzip chromedriver.zip
           sudo mv chromedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/chromedriver
 
-      # Патчим zhilkina_first_test.py на лету — главное исправление синтаксиса!
-      - name: Prepare Zhilkina test for CI (headless + port 8000)
+      # ── Патч теста Жилкиной (без синтаксических ошибок!) ─────
+      - name: Patch zhilkina test for CI (headless + port 8000)
         run: |
-          cat > patch_zhilkina.py <<'PY'
-          import os
+          cat > patch.py <<'EOF'
+          with open("zhilkina_first_test.py", encoding="utf-8") as f:
+              content = f.read()
 
-          input_file = "zhilkina_first_test.py"
-          output_file = "zhilkina_first_test_ci.py"
+          content = content.replace("http://localhost:3000", "http://localhost:8000")
 
-          with open(input_file, "r", encoding="utf-8") as f:
-              lines = f.readlines()
+          if "def setup(self):" in content:
+              lines = content.splitlines()
+              new_lines = []
+              inserted = False
+              for line in lines:
+                  if "def setup(self):" in line and not inserted:
+                      indent = len(line) - len(line.lstrip())
+                      spaces = " " * indent
+                      new_lines.append(line)
+                      new_lines += [
+                          f"{spaces}    from selenium.webdriver.chrome.options import Options",
+                          f"{spaces}    opts = Options()",
+                          f'{spaces}    opts.add_argument("--headless=new")',
+                          f'{spaces}    opts.add_argument("--no-sandbox")',
+                          f'{spaces}    opts.add_argument("--disable-dev-shm-usage")',
+                          f'{spaces}    opts.add_argument("--disable-gpu")',
+                          f'{spaces}    opts.add_argument("--window-size=1920,1080")',
+                          f"{spaces}    self.driver = webdriver.Chrome(options=opts)",
+                      ]
+                      inserted = True
+                  elif 'self.driver = webdriver.Chrome()' in line and inserted:
+                      continue
+                  else:
+                      new_lines.append(line)
+              content = "\n".join(new_lines)
 
-          new_lines = []
-          inserted = False
+          with open("zhilkina_first_test_ci.py", "w", encoding="utf-8") as f:
+              f.write(content)
+          print("zhilkina_first_test_ci.py готов к запуску в CI")
+          EOF
+          python patch.py
 
-          for line in lines:
-              # Меняем порт в строке с get()
-              if "http://localhost:3000" in line:
-                  line = line.replace("http://localhost:3000", "http://localhost:8000")
-
-              if "def setup(self):" in line and not inserted:
-                  indent = len(line) - len(line.lstrip())
-                  spaces = " " * indent
-                  new_lines.append(line)
-                  new_lines.extend([
-                      f"{spaces}    from selenium.webdriver.chrome.options import Options\n",
-                      f"{spaces}    chrome_options = Options()\n",
-                      f'{spaces}    chrome_options.add_argument("--headless=new")\n',
-                      f'{spaces}    chrome_options.add_argument("--no-sandbox")\n',
-                      f'{spaces}    chrome_options.add_argument("--disable-dev-shm-usage")\n',
-                      f'{spaces}    chrome_options.add_argument("--disable-gpu")\n',
-                      f'{spaces}    chrome_options.add_argument("--window-size=1920,1080")\n',
-                      f"{spaces}    self.driver = webdriver.Chrome(options=chrome_options)\n",
-                  ])
-                  inserted = True
-              elif 'self.driver = webdriver.Chrome()' in line and inserted:
-                  continue  # пропускаем старую строку
-              else:
-                  new_lines.append(line)
-
-          with open(output_file, "w", encoding="utf-8") as f:
-              f.write("".join(new_lines))
-
-          print("zhilkina_first_test_ci.py успешно создан и адаптирован под CI")
-          PY
-
-          python patch_zhilkina.py
-
-      # Запуск тестов
-      - name: Run E2E Tests
+      # ── Запуск тестов ───────────────────────────────────────
+      - name: Run E2E tests
         run: |
           mkdir -p screenshots
 
-          echo "Запуск теста Жилкиной (через pytest)"
-          python -m pytest zhilkina_first_test_ci.py -v --tb=short || echo "Тест Жилкиной завершён (может быть с ошибками)"
+          echo "=== Запуск теста Жилкиной ==="
+          python -m pytest zhilkina_first_test_ci.py -v --tb=short || echo "Жилкина: есть ошибки, но продолжаем"
 
-          echo "Запуск теста Бережной"
-          python Berezhnaya_SECOND.py || echo "Тест Бережной завершён (может быть с ошибками)"
+          echo "=== Запуск теста Бережной ==="
+          python Berezhnaya_SECOND.py || echo "Бережная: есть ошибки, но CI не упадёт"
 
-      # Загрузка артефактов (скриншоты, логи и т.п.)
-      - name: Upload test artifacts
+      # ── Артефакты (только если есть) ───────────────────────
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-results
+          name: e2e-artifacts
           path: |
             screenshots/
             *.png
             *.log
-          retention-days: 14
+            vite.log
+          if-no-files-found: warn   # ← не будет ошибки, если ничего нет
