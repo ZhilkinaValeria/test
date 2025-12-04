@@ -15,7 +15,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Установка Node.js
+      # Установка Node.js + запуск фронтенда
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -25,15 +25,14 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Запускаем один сервер на порту 8000 (для обоих тестов)
       - name: Start Vite dev server
         run: |
           npm run dev -- --port 8000 --host 0.0.0.0 &
           sleep 10
-          npx wait-on http://127.0.0.1:8000 -t 60000
-          echo "Server running on http://localhost:8000"
+          npx wait-on http://127.0.0.1:8000 --timeout 60000
+          echo "Server is running on http://localhost:8000"
 
-      # Установка Python
+      # Установка Python и зависимостей
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -44,95 +43,92 @@ jobs:
         run: |
           pip install selenium pytest webdriver-manager
 
-      # Установка Chrome и ChromeDriver
-      - name: Setup Chrome
+      # Установка Google Chrome (современный способ, без устаревшего apt-key)
+      - name: Install Google Chrome
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget unzip
-          
-          # Установка Chrome
-          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          
-          # Установка ChromeDriver
-          CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
-          wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}"
-          CHROMEDRIVER_VERSION=$(wget -q -O - "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}")
-          wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip"
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/googlechrome.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt update
+          sudo apt install -y google-chrome-stable
+
+      # Установка ChromeDriver (ручная, т.к. в тестах используется webdriver.Chrome(), а не webdriver-manager)
+      - name: Install ChromeDriver
+        run: |
+          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+')
+          MAJOR_VERSION=$(echo "$CHROME_VERSION" | cut -d. -f1)
+          DRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$MAJOR_VERSION")
+          wget -q "https://chromedriver.storage.googleapis.com/$DRIVER_VERSION/chromedriver_linux64.zip"
           unzip chromedriver_linux64.zip
           sudo mv chromedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/chromedriver
 
-      # Патчим zhilkina_first_test.py на лету
-      - name: Prepare tests for CI
+      # Патчим zhilkina_first_test.py на лету — главное исправление синтаксиса!
+      - name: Prepare Zhilkina test for CI (headless + port 8000)
         run: |
-          # Создаем временный файл для zhilkina теста
-          python -c '
-import re
+          cat > patch_zhilkina.py <<'PY'
+          import os
 
-# Читаем исходный файл
-with open("zhilkina_first_test.py", "r") as f:
-    content = f.read()
+          input_file = "zhilkina_first_test.py"
+          output_file = "zhilkina_first_test_ci.py"
 
-# Заменяем порт 3000 на 8000
-content = content.replace("http://localhost:3000", "http://localhost:8000")
+          with open(input_file, "r", encoding="utf-8") as f:
+              lines = f.readlines()
 
-# Добавляем headless настройки
-if "def setup(self):" in content:
-    # Находим место для вставки настроек Chrome
-    lines = content.split("\n")
-    new_lines = []
-    skip_next = False
-    for line in lines:
-        if "def setup(self):" in line:
-            new_lines.append(line)
-            # Добавляем отступ для следующей строки
-            indent = " " * 8
-            new_lines.append(f"{indent}from selenium.webdriver.chrome.options import Options")
-            new_lines.append(f"{indent}chrome_options = Options()")
-            new_lines.append(f'{indent}chrome_options.add_argument("--headless")')
-            new_lines.append(f'{indent}chrome_options.add_argument("--no-sandbox")')
-            new_lines.append(f'{indent}chrome_options.add_argument("--disable-dev-shm-usage")')
-            new_lines.append(f'{indent}chrome_options.add_argument("--window-size=1920,1080")')
-            new_lines.append(f"{indent}self.driver = webdriver.Chrome(options=chrome_options)")
-            skip_next = True
-        elif "self.driver = webdriver.Chrome()" in line and skip_next:
-            skip_next = False
-            continue
-        else:
-            new_lines.append(line)
-    
-    content = "\n".join(new_lines)
+          new_lines = []
+          inserted = False
 
-# Сохраняем измененный файл
-with open("zhilkina_first_test_ci.py", "w") as f:
-    f.write(content)
+          for line in lines:
+              # Меняем порт в строке с get()
+              if "http://localhost:3000" in line:
+                  line = line.replace("http://localhost:3000", "http://localhost:8000")
 
-print("Created zhilkina_first_test_ci.py with CI adaptations")
-'
+              if "def setup(self):" in line and not inserted:
+                  indent = len(line) - len(line.lstrip())
+                  spaces = " " * indent
+                  new_lines.append(line)
+                  new_lines.extend([
+                      f"{spaces}    from selenium.webdriver.chrome.options import Options\n",
+                      f"{spaces}    chrome_options = Options()\n",
+                      f'{spaces}    chrome_options.add_argument("--headless=new")\n',
+                      f'{spaces}    chrome_options.add_argument("--no-sandbox")\n',
+                      f'{spaces}    chrome_options.add_argument("--disable-dev-shm-usage")\n',
+                      f'{spaces}    chrome_options.add_argument("--disable-gpu")\n',
+                      f'{spaces}    chrome_options.add_argument("--window-size=1920,1080")\n',
+                      f"{spaces}    self.driver = webdriver.Chrome(options=chrome_options)\n",
+                  ])
+                  inserted = True
+              elif 'self.driver = webdriver.Chrome()' in line and inserted:
+                  continue  # пропускаем старую строку
+              else:
+                  new_lines.append(line)
+
+          with open(output_file, "w", encoding="utf-8") as f:
+              f.write("".join(new_lines))
+
+          print("zhilkina_first_test_ci.py успешно создан и адаптирован под CI")
+          PY
+
+          python patch_zhilkina.py
 
       # Запуск тестов
-      - name: Run Tests
+      - name: Run E2E Tests
         run: |
           mkdir -p screenshots
-          
-          echo "=== Running zhilkina_first_test_ci.py ==="
-          python -m pytest zhilkina_first_test_ci.py -v --tb=short || echo "Zhilkina tests completed"
-          
-          echo ""
-          echo "=== Running Berezhnaya_SECOND.py ==="
-          python Berezhnaya_SECOND.py || echo "Berezhnaya tests completed"
 
-      # Артефакты
-      - name: Upload artifacts
+          echo "Запуск теста Жилкиной (через pytest)"
+          python -m pytest zhilkina_first_test_ci.py -v --tb=short || echo "Тест Жилкиной завершён (может быть с ошибками)"
+
+          echo "Запуск теста Бережной"
+          python Berezhnaya_SECOND.py || echo "Тест Бережной завершён (может быть с ошибками)"
+
+      # Загрузка артефактов (скриншоты, логи и т.п.)
+      - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: e2e-test-results
           path: |
+            screenshots/
             *.png
             *.log
-            screenshots/
-          retention-days: 7
+          retention-days: 14
