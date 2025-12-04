@@ -69,47 +69,49 @@ jobs:
       - name: Prepare tests for CI
         run: |
           # Создаем временный файл для zhilkina теста
-          python -c "
+          python -c '
 import re
 
 # Читаем исходный файл
-with open('zhilkina_first_test.py', 'r') as f:
+with open("zhilkina_first_test.py", "r") as f:
     content = f.read()
 
 # Заменяем порт 3000 на 8000
-content = content.replace('http://localhost:3000', 'http://localhost:8000')
+content = content.replace("http://localhost:3000", "http://localhost:8000")
 
 # Добавляем headless настройки
-if 'def setup(self):' in content:
+if "def setup(self):" in content:
     # Находим место для вставки настроек Chrome
-    lines = content.split('\\n')
+    lines = content.split("\n")
     new_lines = []
-    for i, line in enumerate(lines):
-        new_lines.append(line)
-        if 'def setup(self):' in line:
+    skip_next = False
+    for line in lines:
+        if "def setup(self):" in line:
+            new_lines.append(line)
             # Добавляем отступ для следующей строки
-            indent = ' ' * 8
-            new_lines.append(f'{indent}from selenium.webdriver.chrome.options import Options')
-            new_lines.append(f'{indent}chrome_options = Options()')
-            new_lines.append(f'{indent}chrome_options.add_argument(\"--headless\")')
-            new_lines.append(f'{indent}chrome_options.add_argument(\"--no-sandbox\")')
-            new_lines.append(f'{indent}chrome_options.add_argument(\"--disable-dev-shm-usage\")')
-            new_lines.append(f'{indent}chrome_options.add_argument(\"--window-size=1920,1080\")')
-            new_lines.append(f'{indent}self.driver = webdriver.Chrome(options=chrome_options)')
-            # Пропускаем оригинальную строку создания драйвера
+            indent = " " * 8
+            new_lines.append(f"{indent}from selenium.webdriver.chrome.options import Options")
+            new_lines.append(f"{indent}chrome_options = Options()")
+            new_lines.append(f'{indent}chrome_options.add_argument("--headless")')
+            new_lines.append(f'{indent}chrome_options.add_argument("--no-sandbox")')
+            new_lines.append(f'{indent}chrome_options.add_argument("--disable-dev-shm-usage")')
+            new_lines.append(f'{indent}chrome_options.add_argument("--window-size=1920,1080")')
+            new_lines.append(f"{indent}self.driver = webdriver.Chrome(options=chrome_options)")
             skip_next = True
-        elif 'self.driver = webdriver.Chrome()' in line and skip_next:
+        elif "self.driver = webdriver.Chrome()" in line and skip_next:
             skip_next = False
             continue
+        else:
+            new_lines.append(line)
     
-    content = '\\n'.join(new_lines)
+    content = "\n".join(new_lines)
 
 # Сохраняем измененный файл
-with open('zhilkina_first_test_ci.py', 'w') as f:
+with open("zhilkina_first_test_ci.py", "w") as f:
     f.write(content)
 
-print('Created zhilkina_first_test_ci.py with CI adaptations')
-"
+print("Created zhilkina_first_test_ci.py with CI adaptations")
+'
 
       # Запуск тестов
       - name: Run Tests
